@@ -17,8 +17,8 @@ document = loader.load()
 
 print("Chunking text...")
 text_splitter = RecursiveCharacterTextSplitter(
-    chunk_size=500,
-    chunk_overlap=50
+    chunk_size=1000,
+    chunk_overlap=200
 )
 chunks = text_splitter.split_documents(document)
 # print(chunks[0].page_content)
@@ -32,7 +32,7 @@ vector_db = Chroma.from_documents(
 )
 
 # Configure the database to act as a document retriever
-retriever = vector_db.as_retriever(search_kwargs={"k": 2})
+retriever = vector_db.as_retriever(search_kwargs={"k": 5})
 
 # Define the hidden prompt structure for the LLM
 template = """
@@ -63,7 +63,40 @@ rag_chain = (
 )
 
 user_question = "What days can I work from home?"
-print(f"\nQuestion: {user_question}")
+# print(f"\nQuestion: {user_question}")
 
 response = rag_chain.invoke(user_question)
-print(f"Answer: {response.content}")
+# print(f"Answer: {response.content}")
+
+# Clean up the output if Gemini returns a list of content blocks
+if isinstance(response.content, list):
+    clean_answer = response.content[0]['text']
+else:
+    clean_answer = response.content
+
+# print(f"Answer: {clean_answer}")
+
+# Chat with your PDF in a continuous loop
+print("\n--- PDF Chatbot Initialized ---")
+print("Type 'exit' or 'quit' to stop.")
+
+while True:
+    # 1. Wait for the user to type a question
+    user_question = input("\nYour Question: ")
+
+    # 2. Allow the user to break the loop and close the program
+    if user_question.lower() in ['exit', 'quit']:
+        print("Shutting down chatbot. Goodbye!")
+        break
+
+    # 3. Send the question through our RAG chain
+    response = rag_chain.invoke(user_question)
+
+    # 4. Clean up the output format
+    if isinstance(response.content, list):
+        clean_answer = response.content[0]['text']
+    else:
+        clean_answer = response.content
+
+    # 5. Print the final answer to the console
+    print(f"Answer: {clean_answer}")
