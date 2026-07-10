@@ -1,0 +1,415 @@
+RAG Project Learning Notes: Suggestions, Alternatives, and Fixes
+================================================================
+
+This file captures the main things learned while building and debugging the
+PDF RAG chatbot. It is meant as a reference to read later when reviewing what
+changed, why it changed, and what alternatives are available.
+
+
+1. What This Application Is Doing
+---------------------------------
+
+This app is a Retrieval-Augmented Generation (RAG) chatbot for a PDF document.
+
+The flow is:
+
+1. Load the PDF file.
+2. Split the PDF text into smaller chunks.
+3. Convert those chunks into embeddings.
+4. Store the embeddings in a local Chroma vector database.
+5. When the user asks a question, search Chroma for the most relevant chunks.
+6. Pass those chunks plus the question into an LLM prompt.
+7. Return a concise answer based only on the retrieved context.
+
+The important idea is that the LLM is not reading the whole PDF every time.
+The retriever first chooses the most relevant chunks, and the LLM answers from
+those chunks.
+
+
+2. Gemini Is Not Required: LangChain Can Use Many Providers
+-----------------------------------------------------------
+
+LangChain is not only for Google Gemini. LangChain is a general framework for
+building applications around LLMs, embeddings, retrievers, vector databases,
+tools, prompts, and chains.
+
+It can integrate with many model providers, including:
+
+- Google Gemini
+- OpenAI GPT models
+- Anthropic Claude
+- Mistral
+- Cohere
+- Hugging Face
+- Ollama/local models
+- Azure OpenAI
+- AWS Bedrock
+
+The RAG architecture stays mostly the same. The provider-specific pieces are
+the embeddings model and the chat model.
+
+
+3. Current Gemini-Based Setup
+-----------------------------
+
+Current Gemini imports:
+
+from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
+
+Current Gemini embeddings:
+
+embeddings = GoogleGenerativeAIEmbeddings(
+    model="models/gemini-embedding-001"
+)
+
+Current Gemini chat model:
+
+llm = ChatGoogleGenerativeAI(
+    model="gemini-3.1-flash-lite",
+    temperature=0
+)
+
+The embeddings model converts document text into vectors.
+The chat model generates the final answer.
+
+
+4. OpenAI GPT Alternative
+------------------------
+
+To switch from Gemini to OpenAI, install the OpenAI LangChain package:
+
+pip install langchain-openai
+
+Add an OpenAI API key to .env:
+
+OPENAI_API_KEY=your_openai_api_key_here
+
+Replace Gemini chat model imports:
+
+from langchain_google_genai import ChatGoogleGenerativeAI
+
+with:
+
+from langchain_openai import ChatOpenAI
+
+Then replace:
+
+llm = ChatGoogleGenerativeAI(model="gemini-3.1-flash-lite", temperature=0)
+
+with something like:
+
+llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+
+For embeddings, replace:
+
+from langchain_google_genai import GoogleGenerativeAIEmbeddings
+
+embeddings = GoogleGenerativeAIEmbeddings(
+    model="models/gemini-embedding-001"
+)
+
+with:
+
+from langchain_openai import OpenAIEmbeddings
+
+embeddings = OpenAIEmbeddings(
+    model="text-embedding-3-small"
+)
+
+The rest of the RAG pipeline can usually remain almost identical.
+
+
+5. Gemini Embeddings Error: embedding-001 Not Found
+--------------------------------------------------
+
+Earlier error:
+
+models/embedding-001 is not found for API version v1beta,
+or is not supported for embedContent
+
+Cause:
+
+The app was using an old or unsupported embedding model name:
+
+GoogleGenerativeAIEmbeddings(model="models/embedding-001")
+
+Resolution:
+
+Use the current Gemini embedding model:
+
+GoogleGenerativeAIEmbeddings(model="models/gemini-embedding-001")
+
+Important lesson:
+
+If the app fails while creating the vector database, check the embedding model
+name first. The PDF loading and chunking may be working fine, but the embedding
+API call can still fail if the model name is outdated or unsupported.
+
+
+6. Gemini 503 High Demand Error
+-------------------------------
+
+Later error:
+
+503 UNAVAILABLE
+This model is currently experiencing high demand.
+
+Cause:
+
+The app successfully created the vector database and reached the LLM response
+step, but the Gemini chat model endpoint was temporarily overloaded.
+
+Resolution options:
+
+1. Wait and rerun the app.
+2. Try a different Gemini chat model.
+3. Add retry handling around rag_chain.invoke(...).
+
+This was not a RAG logic problem. It was a temporary provider-side availability
+problem.
+
+
+7. LangChain Community Deprecation / Sunset Warning
+---------------------------------------------------
+
+Some LangChain integrations originally lived under langchain_community.
+LangChain has been moving many integrations into dedicated packages.
+
+The warning was related to imports like:
+
+from langchain_community.vectorstores import Chroma
+
+Recommended alternative:
+
+pip install -U langchain-chroma
+
+Then import Chroma from:
+
+from langchain_chroma import Chroma
+
+Current app still uses:
+
+from langchain_community.document_loaders import PyPDFLoader
+
+At the time of review, PyPDFLoader is still commonly shown under
+langchain_community.document_loaders, so that import may still be acceptable.
+
+Summary:
+
+- langchain_community.vectorstores.Chroma -> langchain_chroma.Chroma
+- langchain_google_genai -> already provider-specific and fine
+- langchain_core -> fine
+- langchain_text_splitters -> fine
+- PyPDFLoader under langchain_community -> still commonly used
+
+
+8. Retrieval Problem: Why PTO Answers Were Wrong
+------------------------------------------------
+
+Problem observed:
+
+The document said employees get 20 days of paid time off per calendar year,
+but the chatbot answered mostly about carrying forward five unused PTO days.
+
+Example bad answer:
+
+"Employees may carry forward up to five days of unused PTO into the following
+year. The provided text does not specify a total annual PTO allowance."
+
+Cause:
+
+This was a retrieval problem, not a generation problem.
+
+The retriever was not sending the chunk containing "20 days of paid time off"
+to the LLM. Instead, it was retrieving the chunk about unused PTO carry-forward.
+
+Since the prompt says to answer only from retrieved context, the LLM could not
+mention the 20-day policy unless the retriever included that text.
+
+Important lesson:
+
+If a RAG answer is wrong or incomplete, first inspect what context was retrieved.
+The LLM can only answer from what the retriever gives it.
+
+
+9. Original Retrieval Settings
+------------------------------
+
+Earlier settings:
+
+chunk_size=500
+chunk_overlap=50
+k=2
+
+Issue:
+
+The chunks were small, and only two chunks were retrieved. Related PTO details
+could be split apart:
+
+- one chunk might contain "20 days paid time off"
+- another chunk might contain "carry forward up to five days"
+
+For broad questions like "PTO?" or "How many PTOs?", the retriever selected the
+carry-forward chunk but missed the annual allowance chunk.
+
+
+10. Improved Retrieval Settings
+-------------------------------
+
+Updated settings:
+
+chunk_size=1000
+chunk_overlap=200
+k=5
+
+Why this helped:
+
+chunk_size=1000:
+
+Keeps more related policy text together in the same chunk.
+
+chunk_overlap=200:
+
+Prevents important sentences from being split awkwardly across chunk boundaries.
+If a section crosses a boundary, overlapping text helps preserve context.
+
+k=5:
+
+Retrieves the top five chunks instead of only two. This gives the LLM a better
+chance of seeing both the main PTO allowance and the carry-forward rule.
+
+Result:
+
+After the change, asking "PTO?" returned a much better answer:
+
+"Employees receive 20 days of paid time off annually, with up to five unused
+days eligible to be carried forward into the following year..."
+
+
+11. Why "How Many PTOs?" Was Harder
+-----------------------------------
+
+The question "How many PTOs?" is short and somewhat unnatural.
+
+Embedding models may not connect "PTOs" as strongly with:
+
+"paid time off days per calendar year"
+
+The retriever may prefer text containing the exact acronym "PTO", even if that
+text is about carry-forward and not the annual allowance.
+
+Better user phrasing:
+
+"How many paid time off days do employees receive per calendar year?"
+
+Possible app improvement:
+
+Normalize short user questions before retrieval. For example:
+
+def normalize_question(question):
+    q = question.lower().strip()
+
+    if "pto" in q or "paid time off" in q:
+        return "How many paid time off days do employees receive per calendar year?"
+
+    return question
+
+This helps convert vague user questions into better retrieval queries.
+
+
+12. Debugging Retrieval
+-----------------------
+
+When answers are wrong, print the retrieved chunks before calling the LLM:
+
+docs = retriever.invoke(user_question)
+
+print("\n--- Retrieved Context ---")
+for i, doc in enumerate(docs, 1):
+    print(f"\nChunk {i}:")
+    print(doc.page_content[:500])
+
+This shows whether the retriever found the correct document text.
+
+If the correct text is not in the retrieved context, changing the prompt will
+not reliably fix the answer. The retrieval setup needs to improve.
+
+
+13. Rebuilding Chroma
+---------------------
+
+If these change:
+
+- PDF content
+- chunk size
+- chunk overlap
+- embedding model
+- Chroma settings
+
+then delete and rebuild the local vector database.
+
+PowerShell:
+
+Remove-Item -Recurse -Force .\chroma_db
+python rag_app.py
+
+Reason:
+
+Chroma stores embeddings created from the old chunks. If chunk settings change,
+the database must be regenerated so it uses the new chunk layout.
+
+
+14. Practical RAG Debugging Checklist
+-------------------------------------
+
+When the answer is bad:
+
+1. Did the PDF load correctly?
+2. Did the text split correctly?
+3. Did the vector database build successfully?
+4. Is the retriever returning the right chunks?
+5. Is k large enough?
+6. Are chunks too small?
+7. Is overlap too small?
+8. Is the user question too vague for retrieval?
+9. Is the prompt too restrictive?
+10. Is the LLM provider returning an API error?
+
+Most wrong RAG answers are retrieval problems, not LLM problems.
+
+
+15. Current Good Baseline
+-------------------------
+
+Current settings that worked well for the employee handbook PDF:
+
+text_splitter = RecursiveCharacterTextSplitter(
+    chunk_size=1000,
+    chunk_overlap=200
+)
+
+retriever = vector_db.as_retriever(search_kwargs={"k": 5})
+
+These are reasonable baseline settings for a small-to-medium PDF.
+
+For much larger documents, consider:
+
+- adding source chunk debugging
+- using metadata filters
+- using a reranker
+- splitting by headings/sections instead of only character count
+- storing page numbers and showing citations
+
+
+16. Main Takeaways
+------------------
+
+- LangChain can use Gemini, OpenAI GPT, Claude, local models, and many others.
+- Switching providers mostly changes embeddings and chat model imports.
+- Chroma stores vectors locally for retrieval.
+- If retrieval misses the right text, the LLM cannot answer accurately.
+- Larger chunks and more retrieved chunks fixed the PTO issue.
+- Rebuild chroma_db after changing chunking or embeddings.
+- langchain_community is being split into dedicated packages where possible.
+- For Chroma, prefer langchain_chroma when updating the project.
+- API errors like 503 are usually provider availability issues, not app logic.
