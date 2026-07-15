@@ -83,10 +83,10 @@ rag_chain = (
 # print(f"Answer: {response.content}")
 
 # Clean up the output if Gemini returns a list of content blocks
-if isinstance(response.content, list):
-    clean_answer = response.content[0]['text']
-else:
-    clean_answer = response.content
+# if isinstance(response.content, list):
+#     clean_answer = response.content[0]['text']
+# else:
+#     clean_answer = response.content
 
 # print(f"Answer: {clean_answer}")
 
