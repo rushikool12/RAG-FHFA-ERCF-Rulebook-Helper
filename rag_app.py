@@ -1,6 +1,8 @@
 import os
 from dotenv import load_dotenv
-from langchain_community.document_loaders import PyPDFLoader
+# from langchain_community.document_loaders import PyPDFLoader
+from pypdf import PdfReader
+from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
 # from langchain_community.vectorstores import Chroma
@@ -13,8 +15,24 @@ from langchain_core.runnables import RunnablePassthrough
 load_dotenv()
 
 print ("Loading PDF file...")
-loader = PyPDFLoader("./FHFA_ERCF_Framework.pdf")
-document = loader.load()
+# loader = PyPDFLoader("./FHFA_ERCF_Framework.pdf")
+# document = loader.load()
+pdf_path = "./FHFA_ERCF_Framework.pdf"
+reader = PdfReader(pdf_path)
+
+document = []
+for page_number, page in enumerate(reader.pages):
+    text = page.extract_text() or ""
+    document.append(
+        Document(
+            page_content=text,
+            metadata={
+                "source": pdf_path,
+                "page": page_number,
+                "total_pages": len(reader.pages),
+            },
+        )
+    )
 # print(document[0].page_content)
 
 print("Chunking text...")
