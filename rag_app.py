@@ -1,9 +1,13 @@
 import os
 from dotenv import load_dotenv
-from langchain_community.document_loaders import PyPDFLoader
+# from langchain_community.document_loaders import PyPDFLoader
+from pypdf import PdfReader
+from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
-from langchain_community.vectorstores import Chroma
+# from langchain_community.vectorstores import Chroma
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_chroma import Chroma
 from langchain_core.prompts import PromptTemplate
 from langchain_core.runnables import RunnablePassthrough
 
@@ -11,25 +15,53 @@ from langchain_core.runnables import RunnablePassthrough
 load_dotenv()
 
 print ("Loading PDF file...")
-loader = PyPDFLoader("./TechCorp_Official_Employee_Handbook.pdf")
-document = loader.load()
+# loader = PyPDFLoader("./FHFA_ERCF_Framework.pdf")
+# document = loader.load()
+pdf_path = "./FHFA_ERCF_Framework.pdf"
+reader = PdfReader(pdf_path)
+
+document = []
+for page_number, page in enumerate(reader.pages):
+    text = page.extract_text() or ""
+    document.append(
+        Document(
+            page_content=text,
+            metadata={
+                "source": pdf_path,
+                "page": page_number,
+                "total_pages": len(reader.pages),
+            },
+        )
+    )
 # print(document[0].page_content)
 
 print("Chunking text...")
 text_splitter = RecursiveCharacterTextSplitter(
-    chunk_size=1000,
+    chunk_size=2000,
     chunk_overlap=200
 )
 chunks = text_splitter.split_documents(document)
+print(f"Total pages: {len(document)}")
+print(f"Total chunks: {len(chunks)}")
 # print(chunks[0].page_content)
 
-print("Creating vector database...")
-embeddings = GoogleGenerativeAIEmbeddings(model="models/gemini-embedding-001")
-vector_db = Chroma.from_documents(
-    documents=chunks, 
-    embedding=embeddings, 
-    persist_directory="./chroma_db"
+# embeddings = GoogleGenerativeAIEmbeddings(model="models/gemini-embedding-001")
+embeddings = HuggingFaceEmbeddings(
+    model_name="sentence-transformers/all-MiniLM-L6-v2"
 )
+if os.path.exists("./chroma_db"):
+    print("Loading existing vector database...")
+    vector_db = Chroma(
+        persist_directory="./chroma_db",
+        embedding_function=embeddings
+    )
+else:
+    print("Creating vector database...")
+    vector_db = Chroma.from_documents(
+        documents=chunks,
+        embedding=embeddings,
+        persist_directory="./chroma_db"
+    )
 
 # Configure the database to act as a document retriever
 retriever = vector_db.as_retriever(search_kwargs={"k": 5})
@@ -62,17 +94,17 @@ rag_chain = (
     | llm
 )
 
-user_question = "What days can I work from home?"
+# user_question = "What days can I work from home?"
 # print(f"\nQuestion: {user_question}")
 
-response = rag_chain.invoke(user_question)
+# response = rag_chain.invoke(user_question)
 # print(f"Answer: {response.content}")
 
 # Clean up the output if Gemini returns a list of content blocks
-if isinstance(response.content, list):
-    clean_answer = response.content[0]['text']
-else:
-    clean_answer = response.content
+# if isinstance(response.content, list):
+#     clean_answer = response.content[0]['text']
+# else:
+#     clean_answer = response.content
 
 # print(f"Answer: {clean_answer}")
 

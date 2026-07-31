@@ -1,12 +1,14 @@
 # RAG PDF Chatbot
 
-This project is a small Retrieval-Augmented Generation (RAG) application that lets you ask questions about a PDF document from the command line. The current PDF is an employee handbook:
+This project is a small Retrieval-Augmented Generation (RAG) application that lets you ask questions about a PDF document from the command line. The current PDF is a larger framework document:
 
 ```text
-TechCorp_Official_Employee_Handbook.pdf
+FHFA_ERCF_Framework.pdf
 ```
 
 The app loads the PDF, splits it into searchable text chunks, stores those chunks in a local Chroma vector database, retrieves the most relevant chunks for each question, and sends that context to a Gemini chat model to generate concise answers.
+
+The current version uses local HuggingFace embeddings for indexing, which avoids consuming Gemini embedding quota when processing larger PDFs.
 
 ## Current Folder Structure
 
@@ -16,7 +18,8 @@ test_new/
 |-- .gitignore
 |-- README.md
 |-- rag_app.py
-|-- TechCorp_Official_Employee_Handbook.pdf
+|-- FHFA_ERCF_Framework.pdf
+|-- suggestions_alternatives.txt
 |-- chroma_db/
 `-- venv/
 ```
@@ -28,9 +31,9 @@ test_new/
 Main application file. It contains the full RAG pipeline:
 
 - loads environment variables from `.env`
-- loads the handbook PDF
+- loads the PDF document
 - splits the PDF text into chunks
-- creates embeddings with Gemini
+- creates local embeddings with HuggingFace Sentence Transformers
 - stores/reloads vectors with Chroma
 - retrieves the most relevant document chunks
 - sends retrieved context and the user question to Gemini
@@ -46,9 +49,13 @@ Example:
 GOOGLE_API_KEY=your_api_key_here
 ```
 
-`TechCorp_Official_Employee_Handbook.pdf`
+`FHFA_ERCF_Framework.pdf`
 
 The source document used by the chatbot. The app answers questions based on this PDF.
+
+`suggestions_alternatives.txt`
+
+Learning notes from the project. This includes model alternatives, LangChain package notes, retrieval tuning, Gemini quota/rate-limit lessons, and future project ideas.
 
 `chroma_db/`
 
@@ -66,22 +73,23 @@ Tells Git which files and folders to ignore, such as `venv/`, `.env`, cache file
 
 1. The app loads the PDF with `PyPDFLoader`.
 2. The text is split using `RecursiveCharacterTextSplitter`.
-3. Each chunk is converted into an embedding using `GoogleGenerativeAIEmbeddings`.
+3. Each chunk is converted into an embedding using local HuggingFace embeddings.
 4. Chroma stores those embeddings locally in `chroma_db/`.
-5. For each user question, Chroma retrieves the top matching chunks.
-6. The retrieved context is inserted into a prompt template.
-7. `ChatGoogleGenerativeAI` sends the prompt to Gemini.
-8. The answer is printed in the terminal.
+5. On future runs, the app loads the existing `chroma_db/` instead of recreating embeddings.
+6. For each user question, Chroma retrieves the top matching chunks.
+7. The retrieved context is inserted into a prompt template.
+8. `ChatGoogleGenerativeAI` sends the prompt to Gemini.
+9. The answer is printed in the terminal.
 
 Current retrieval settings:
 
 ```python
-chunk_size=1000
+chunk_size=2000
 chunk_overlap=200
 k=5
 ```
 
-These settings help keep related policy text together and return enough context for accurate answers.
+These settings reduce the number of chunks for larger PDFs while still keeping enough overlap to preserve context across chunk boundaries.
 
 ## Setup
 
@@ -96,7 +104,7 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 Install the required packages:
 
 ```powershell
-pip install python-dotenv langchain langchain-community langchain-text-splitters langchain-google-genai chromadb pypdf
+pip install python-dotenv langchain langchain-community langchain-text-splitters langchain-google-genai langchain-chroma langchain-huggingface chromadb pypdf sentence-transformers
 ```
 
 Create a `.env` file with your Google API key:
@@ -127,8 +135,8 @@ Example questions:
 ```text
 PTO?
 How many paid time off days do employees receive per calendar year?
-What days can I work from home?
-What is the leave policy?
+What are the main risks described in the framework?
+Summarize the key governance expectations.
 ```
 
 ## Rebuilding The Vector Database
@@ -152,7 +160,7 @@ python rag_app.py
 Embeddings:
 
 ```python
-GoogleGenerativeAIEmbeddings(model="models/gemini-embedding-001")
+HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
 ```
 
 Chat model:
@@ -166,4 +174,11 @@ ChatGoogleGenerativeAI(model="gemini-3.1-flash-lite", temperature=0)
 - The app answers only from retrieved PDF context.
 - If an answer is incomplete, inspect the retrieved chunks or increase `k`.
 - If the PDF or chunking settings change, rebuild `chroma_db/`.
-- `langchain_community.vectorstores.Chroma` may show deprecation warnings in newer LangChain versions. The dedicated replacement is `langchain-chroma` with `from langchain_chroma import Chroma`.
+- `langchain_chroma.Chroma` is used instead of the older `langchain_community.vectorstores.Chroma` import.
+- Local HuggingFace embeddings avoid Gemini 429 errors during large PDF indexing.
+- Gemini is still used for the final answer generation step.
+
+## Current Cleanup Notes
+
+- The app currently loads and chunks the PDF even when `chroma_db/` already exists. A future cleanup can move PDF loading and chunking inside the database creation branch.
+- If the startup test call to `rag_chain.invoke(...)` is commented out, remove any leftover code that references `response` before the chat loop.

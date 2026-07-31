@@ -413,3 +413,319 @@ For much larger documents, consider:
 - langchain_community is being split into dedicated packages where possible.
 - For Chroma, prefer langchain_chroma when updating the project.
 - API errors like 503 are usually provider availability issues, not app logic.
+
+
+17. Scaling From 4 Pages To 100+ Pages
+--------------------------------------
+
+The project was later tested with a larger PDF:
+
+FHFA_ERCF_Framework.pdf
+
+The larger PDF had:
+
+Total pages: 109
+Total chunks: 429
+
+This changed the behavior of the app. With the smaller 4-page PDF, using Gemini
+embeddings was manageable. With the 109-page PDF, the app had to create
+embeddings for hundreds of chunks.
+
+The important line was:
+
+vector_db = Chroma.from_documents(
+    documents=chunks,
+    embedding=embeddings,
+    persist_directory="./chroma_db"
+)
+
+That single line looks simple, but under the hood it creates embeddings for all
+chunks. When Gemini embeddings were used, that meant many calls to the Gemini
+embedding API.
+
+This can trigger:
+
+429 RESOURCE_EXHAUSTED
+
+or similar quota/rate-limit errors.
+
+Important lesson:
+
+The larger the document, the more chunks are created. More chunks means more
+embedding work. If embeddings are created through a paid or rate-limited API,
+indexing large documents can quickly hit limits.
+
+
+18. What Part Of The Code Caused Gemini 429
+-------------------------------------------
+
+The likely cause of Gemini 429 was not the question-answering step. It was the
+initial vector database creation step.
+
+Indexing-time Gemini usage:
+
+embeddings = GoogleGenerativeAIEmbeddings(
+    model="models/gemini-embedding-001"
+)
+
+vector_db = Chroma.from_documents(
+    documents=chunks,
+    embedding=embeddings,
+    persist_directory="./chroma_db"
+)
+
+This sends document chunks to the embedding model.
+
+Question-time Gemini usage:
+
+response = rag_chain.invoke(user_question)
+
+This sends one final prompt to the Gemini chat model per user question.
+
+The 429 happened while creating the first version of the Chroma database because
+the larger PDF produced 429 chunks and those chunks had to be embedded.
+
+
+19. Current Embedding Change: Local HuggingFace Embeddings
+----------------------------------------------------------
+
+To avoid burning Gemini quota during indexing, the app was changed from Gemini
+embeddings to local HuggingFace embeddings.
+
+Old approach:
+
+from langchain_google_genai import GoogleGenerativeAIEmbeddings
+
+embeddings = GoogleGenerativeAIEmbeddings(
+    model="models/gemini-embedding-001"
+)
+
+Current approach:
+
+from langchain_huggingface import HuggingFaceEmbeddings
+
+embeddings = HuggingFaceEmbeddings(
+    model_name="sentence-transformers/all-MiniLM-L6-v2"
+)
+
+This means:
+
+- embeddings are created locally
+- Gemini quota is not used for indexing
+- Chroma still stores vectors locally
+- Gemini can still be used for final answer generation
+
+This is a strong design pattern for a learning/resume project:
+
+Local embeddings -> Chroma -> Gemini/OpenAI for final answer
+
+It shows that the app separates retrieval/indexing from final LLM generation.
+
+
+20. Updated Chunking For Larger PDF
+-----------------------------------
+
+For the larger 109-page PDF, the chunk settings were changed to:
+
+text_splitter = RecursiveCharacterTextSplitter(
+    chunk_size=2000,
+    chunk_overlap=200
+)
+
+Why:
+
+chunk_size=2000:
+
+Creates fewer chunks than chunk_size=1000, which reduces indexing work.
+
+chunk_overlap=200:
+
+Still preserves context between neighboring chunks.
+
+With 109 pages, the app produced 429 chunks. This is not massive for a real
+production system, but it can be enough to hit free-tier API limits if every
+chunk is embedded through an external provider.
+
+
+21. Chroma Persistence Improvement
+----------------------------------
+
+The app was updated to avoid rebuilding the vector database every time.
+
+Current pattern:
+
+if os.path.exists("./chroma_db"):
+    print("Loading existing vector database...")
+    vector_db = Chroma(
+        persist_directory="./chroma_db",
+        embedding_function=embeddings
+    )
+else:
+    print("Creating vector database...")
+    vector_db = Chroma.from_documents(
+        documents=chunks,
+        embedding=embeddings,
+        persist_directory="./chroma_db"
+    )
+
+Why this matters:
+
+Without this check, every app run would recreate embeddings for the entire PDF.
+That wastes time and can hit API limits when using cloud embeddings.
+
+With this check, the app only creates the database when chroma_db does not
+already exist.
+
+Important warning:
+
+If the PDF, chunking settings, or embedding model changes, delete chroma_db and
+rebuild it. Otherwise the existing database may contain old vectors.
+
+
+22. Chroma Import Updated
+-------------------------
+
+The app moved from the older Chroma import:
+
+from langchain_community.vectorstores import Chroma
+
+to the dedicated package import:
+
+from langchain_chroma import Chroma
+
+Install package:
+
+pip install langchain-chroma
+
+This avoids newer LangChain deprecation warnings around Chroma living inside
+langchain_community.
+
+
+23. Current Code Review Notes
+-----------------------------
+
+Good changes currently in the code:
+
+- switched Chroma import to langchain_chroma
+- switched indexing embeddings to local HuggingFace embeddings
+- increased chunk size for the larger PDF
+- kept k=5 for retrieval
+- added page/chunk count logging
+- added Chroma persistence loading when chroma_db exists
+
+Potential cleanup:
+
+1. The app still loads and chunks the PDF even when chroma_db already exists.
+   This is not a quota problem now because embeddings are local, but it is
+   unnecessary startup work. Later, PDF loading and chunking can be moved inside
+   the else block where Chroma is created.
+
+2. The startup test question was commented out:
+
+   # response = rag_chain.invoke(user_question)
+
+   But the code still has a cleanup block that references response before the
+   chat loop:
+
+   if isinstance(response.content, list):
+       clean_answer = response.content[0]['text']
+   else:
+       clean_answer = response.content
+
+   If response is not defined, this will cause:
+
+   NameError: name 'response' is not defined
+
+   Fix:
+
+   Remove that cleanup block, or only keep response cleanup inside the chat
+   loop after response = rag_chain.invoke(user_question).
+
+
+24. Multi-Document Resume Project Direction
+-------------------------------------------
+
+This project can grow into a stronger AI resume project by supporting multiple
+documents.
+
+Multiple PDFs do not need separate splitters or separate vector databases.
+A common design is:
+
+PDF 1, PDF 2, PDF 3...
+    -> load documents
+    -> split into chunks
+    -> attach metadata such as source filename and page number
+    -> embed chunks
+    -> store all chunks in one Chroma database
+    -> retrieve relevant chunks across all documents
+
+Metadata is important:
+
+{
+    "source": "policy_document.pdf",
+    "page": 4
+}
+
+This lets the assistant cite where an answer came from.
+
+Resume-worthy project direction:
+
+Multi-document knowledge assistant with source-grounded answers over internal
+PDFs, using LangChain, local embeddings, Chroma, and Gemini/OpenAI chat models.
+
+
+25. Structured Data Direction: CSV, XLSX, S3
+--------------------------------------------
+
+The app could also evolve to pull PDFs, CSV files, and Excel files from S3.
+
+But structured files should not always be handled with basic RAG.
+
+Good RAG use cases:
+
+- policy questions
+- summaries
+- definitions
+- finding relevant text
+- explaining document sections
+
+Good structured-data use cases:
+
+- totals
+- averages
+- trends
+- grouping by month/region/category
+- filtering rows
+- comparing time periods
+
+For CSV/XLSX, use structured tools such as:
+
+- pandas
+- DuckDB
+- SQLite/Postgres
+- Amazon Athena for larger S3 datasets
+
+Better architecture:
+
+S3 bucket
+    -> PDFs go to RAG/vector search
+    -> CSV/XLSX go to dataframe or SQL analysis
+    -> LLM explains the retrieved text or computed results
+
+This becomes a stronger project:
+
+AI knowledge and analytics assistant over mixed document and structured data
+sources.
+
+
+26. Updated Main Takeaways
+--------------------------
+
+- 429 on the 109-page PDF was caused by embedding many chunks through Gemini.
+- Local HuggingFace embeddings avoid Gemini quota during indexing.
+- Chroma persistence prevents rebuilding vectors on every run.
+- Larger PDFs may need larger chunk sizes to reduce total chunk count.
+- The final Gemini chat call is separate from embedding/indexing.
+- langchain_chroma is the better current Chroma import.
+- A good resume project can combine PDF RAG with structured CSV/XLSX analytics.
+- For structured data, do calculations in code/SQL and use the LLM to explain.
